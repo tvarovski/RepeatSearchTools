@@ -211,6 +211,10 @@ def searchSequenceForRepeats(
     Returns:
         Dictionary mapping query motifs to non-duplicated matched motifs.
     """
+    if not validateDNASquence(sequence):
+        print("Sequence validation failed. Please check your input.")
+        return {}
+
     if imperfect_homology:
         print("Search has been set to find quasi-palindromes")
         if fixed_errors is not False:
@@ -338,6 +342,10 @@ def searchWithPositions(
     Returns:
         Deduplicated list of position-aware repeat records.
     """
+    if not validateDNASquence(sequence):
+        print("Sequence validation failed. Please check your input.")
+        return []
+
     all_repeats: list[RepeatRecord] = []
     seen: set[tuple[int, int, int, int]] = set()
     seq_len = len(sequence)
