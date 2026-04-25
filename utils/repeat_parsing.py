@@ -1,0 +1,396 @@
+from __future__ import annotations
+from typing import TypedDict
+import regex as re
+
+class RepeatRecord(TypedDict):
+    """Position-aware repeat metadata for a single repeat pair."""
+
+    query_seq: str
+    match_seq: str
+    query_start: int
+    query_end: int
+    match_start: int
+    match_end: int
+    is_perfect: bool
+    length: int
+    inverted: bool
+
+
+PairMatch = tuple[str, list[str]]
+
+
+def extractSeqFromFileToList(file_path: str) -> list[list[str]]:
+    """Read FASTA records into a nested list.
+
+    Args:
+        file_path: Path to a FASTA file.
+
+    Returns:
+        A list in the form [[title_0, sequence_0], [title_1, sequence_1], ...].
+    """
+    with open(file_path, "r", encoding="utf-8") as fasta_file:
+        contents = fasta_file.readlines()
+
+    fasta_list: list[list[str]] = []
+    for line in contents:
+        if ">" in line:
+            fasta_list.append([line.strip(">").strip(), ""])
+        else:
+            fasta_list[-1][1] = fasta_list[-1][1] + line.strip()
+
+    print(f"Extraction of sequence information from {file_path} finished.")
+    return fasta_list
+
+def validateDNASquence(sequence: str) -> bool:
+    """Check whether a sequence contains only expected nucleotide symbols.
+
+    Args:
+        sequence: Candidate DNA sequence.
+
+    Returns:
+        True when all characters are canonical DNA symbols (plus gap), else False.
+    """
+    bases = "ATGCatgc-"
+    for base in sequence:
+        if base not in bases:
+            print("warning, sequence doesn't contain canonical nucleotides")
+            return False
+    return True
+
+def compl(base: str) -> str:
+    """Return the complementary nucleotide for a single base.
+
+    Args:
+        base: One nucleotide character.
+
+    Returns:
+        Complementary nucleotide character.
+
+    Raises:
+        ValueError: If the input base is unsupported.
+    """
+    complements = {
+        "A": "T",
+        "T": "A",
+        "G": "C",
+        "C": "G",
+        "a": "t",
+        "t": "a",
+        "g": "c",
+        "c": "g",
+        "-": "-",
+    }
+    if base not in complements:
+        raise ValueError(f"Unsupported base '{base}'.")
+    return complements[base]
+
+def rev_compl(seq: str) -> str:
+    """Return reverse complement of a DNA sequence.
+
+    Args:
+        seq: Input DNA sequence.
+
+    Returns:
+        Reverse-complemented sequence.
+    """
+    return "".join(compl(base) for base in reversed(seq))
+
+def imperfectHomologySearch(
+    sequence: str,
+    query: str,
+    min_homology: float = 0.8,
+    fixed_errors: int | bool = False,
+    inverted: bool = True,
+) -> PairMatch | None:
+    """Search for an approximate homology match in a sequence fragment.
+
+    Args:
+        sequence: Sequence fragment in which to search.
+        query: Query sequence to match.
+        min_homology: Minimum fractional homology used to derive max errors.
+        fixed_errors: Explicit max edit distance. If provided, overrides
+            `min_homology`-derived errors.
+        inverted: Whether to report query in reverse-complement orientation.
+
+    Returns:
+        Tuple of (reported query, matched sequences) when a match is found,
+        otherwise None.
+    """
+    errors = round(len(query) * (1 - min_homology))
+    if fixed_errors is not False:
+        errors = int(fixed_errors)
+
+    output_list = re.findall(f"({query}){{e<={errors}}}", sequence)
+
+    reported_query = rev_compl(query) if inverted else query
+    if output_list:
+        if len(output_list) > 1:
+            print("This is unusual...")
+        print(f"Found possible template(s) for {reported_query}: {output_list}")
+        return reported_query, output_list
+
+    return None
+
+def findInvertedRepeat(
+    sequence: str,
+    query_length: int = 4,
+    min_spacer: int = 4,
+    imperfect_homology: bool = False,
+    min_homology: float = 0.8,
+    fixed_errors: int | bool = False,
+    inverted: bool = True,
+) -> list[PairMatch]:
+    """Find repeating sequence pairs for one query length in a local window.
+
+    Args:
+        sequence: Window sequence to search.
+        query_length: Length of the query motif.
+        min_spacer: Minimum distance between query and candidate match.
+        imperfect_homology: Whether to allow mismatches/indels.
+        min_homology: Minimum fractional homology for approximate search.
+        fixed_errors: Explicit max edit distance for approximate search.
+        inverted: Whether to search for inverted (True) or direct (False) repeats.
+
+    Returns:
+        A list of `(query, [match])` tuples.
+    """
+    query_string = sequence[:query_length]
+    query = rev_compl(query_string) if inverted else query_string
+
+    search_seq = sequence[query_length + min_spacer :]
+    query_complement = rev_compl(query)
+    output_pair_list: list[PairMatch] = []
+
+    for i in range(len(search_seq) - query_length + 1):
+        candidate = search_seq[i : query_length + i]
+
+        if imperfect_homology:
+            output_pair = imperfectHomologySearch(
+                candidate,
+                query,
+                min_homology=min_homology,
+                fixed_errors=fixed_errors,
+                inverted=inverted,
+            )
+            if output_pair is not None:
+                output_pair_list.append(output_pair)
+        elif candidate == query:
+            if inverted:
+                print(f"Success {query_complement}, {candidate}")
+                output_pair_list.append((query_complement, [candidate]))
+            else:
+                print(f"Success {query}, {candidate}")
+                output_pair_list.append((query, [candidate]))
+
+    return output_pair_list
+
+def searchSequenceForRepeats(
+    sequence: str,
+    min_query_length: int = 4,
+    max_query_length: int = 25,
+    min_spacer: int = 0,
+    window_size: int = 250,
+    imperfect_homology: bool = False,
+    min_homology: float = 0.8,
+    fixed_errors: int | bool = False,
+    inverted: bool = True,
+) -> dict[str, list[str]]:
+    """Search a full DNA sequence for repeat pairs.
+
+    Args:
+        sequence: Full DNA sequence.
+        min_query_length: Minimum repeat length to evaluate.
+        max_query_length: Maximum repeat length to evaluate.
+        min_spacer: Minimum spacing between query and match.
+        window_size: Sliding-window size used during scanning.
+        imperfect_homology: Whether to allow approximate matching.
+        min_homology: Minimum homology for approximate matching.
+        fixed_errors: Explicit max edit distance for approximate matching.
+        inverted: Whether to search for inverted (True) or direct (False) repeats.
+
+    Returns:
+        Dictionary mapping query motifs to non-duplicated matched motifs.
+    """
+    if imperfect_homology:
+        print("Search has been set to find quasi-palindromes")
+        if fixed_errors is not False:
+            print(f"    Allowing up to {fixed_errors} errors/mismatches...")
+        else:
+            print(f"    Searching with a minimum of {min_homology} homology")
+    else:
+        print("Search has been set to find perfect palindromes")
+
+    list_of_all_pairs: list[PairMatch] = []
+    sequence_size = len(sequence)
+
+    for query_length in range(min_query_length, max_query_length + 1):
+        print(f"###Searching for inverted-repeating {query_length}bp-long fragments...")
+        for i in range(sequence_size):
+            seq = sequence[i : i + window_size]
+            output_pair_list = findInvertedRepeat(
+                seq,
+                query_length=query_length,
+                min_spacer=min_spacer,
+                imperfect_homology=imperfect_homology,
+                min_homology=min_homology,
+                fixed_errors=fixed_errors,
+                inverted=inverted,
+            )
+            list_of_all_pairs.extend(output_pair_list)
+
+    results_dictionary: dict[str, list[str]] = {}
+    print("Consolidating results...")
+    for query, matches in list_of_all_pairs:
+        match_value = matches[0]
+        if query in results_dictionary:
+            if match_value not in results_dictionary[query]:
+                results_dictionary[query].append(match_value)
+        else:
+            results_dictionary[query] = [match_value]
+
+    print("Results were consolidated...")
+    return results_dictionary
+
+def findRepeatsWithPositions(
+    window: str,
+    window_start: int,
+    query_length: int,
+    min_spacer: int = 0,
+    imperfect_homology: bool = False,
+    min_homology: float = 0.8,
+    fixed_errors: int | bool = False,
+    inverted: bool = True,
+) -> list[RepeatRecord]:
+    """Find repeats in a local window and map coordinates to full sequence.
+
+    Args:
+        window: Sequence window.
+        window_start: Start offset of this window in the full sequence.
+        query_length: Length of repeat motif.
+        min_spacer: Minimum spacing between query and match.
+        imperfect_homology: Whether to allow approximate matching.
+        min_homology: Minimum homology fraction for approximate matching.
+        fixed_errors: Explicit max edit distance for approximate matching.
+        inverted: Whether to search for inverted or direct repeats.
+
+    Returns:
+        List of position-aware repeat records.
+    """
+    query_string = window[:query_length]
+    query = rev_compl(query_string) if inverted else query_string
+    search_seq = window[query_length + min_spacer :]
+    results: list[RepeatRecord] = []
+
+    if imperfect_homology:
+        errors = round(len(query) * (1 - min_homology))
+        if fixed_errors is not False:
+            errors = int(fixed_errors)
+
+    for i in range(len(search_seq) - query_length + 1):
+        candidate = search_seq[i : query_length + i]
+
+        if imperfect_homology:
+            is_match = bool(re.findall(f"({query}){{e<={errors}}}", candidate))
+        else:
+            is_match = candidate == query
+
+        if is_match:
+            results.append(
+                {
+                    "query_seq": query_string,
+                    "match_seq": candidate,
+                    "query_start": window_start,
+                    "query_end": window_start + query_length,
+                    "match_start": window_start + query_length + min_spacer + i,
+                    "match_end": window_start + query_length + min_spacer + i + query_length,
+                    "is_perfect": candidate == query,
+                    "length": query_length,
+                    "inverted": inverted,
+                }
+            )
+
+    return results
+
+def searchWithPositions(
+    sequence: str,
+    min_query_length: int = 4,
+    max_query_length: int = 25,
+    min_spacer: int = 0,
+    window_size: int = 250,
+    imperfect_homology: bool = False,
+    min_homology: float = 0.8,
+    fixed_errors: int | bool = False,
+    inverted: bool = True,
+) -> list[RepeatRecord]:
+    """Search for all repeats and retain exact coordinate information.
+
+    Args:
+        sequence: Full DNA sequence.
+        min_query_length: Minimum repeat length to evaluate.
+        max_query_length: Maximum repeat length to evaluate.
+        min_spacer: Minimum spacing between query and match.
+        window_size: Sliding-window size used during scanning.
+        imperfect_homology: Whether to allow approximate matching.
+        min_homology: Minimum homology for approximate matching.
+        fixed_errors: Explicit max edit distance for approximate matching.
+        inverted: Whether to search for inverted (True) or direct (False) repeats.
+
+    Returns:
+        Deduplicated list of position-aware repeat records.
+    """
+    all_repeats: list[RepeatRecord] = []
+    seen: set[tuple[int, int, int, int]] = set()
+    seq_len = len(sequence)
+
+    for query_length in range(min_query_length, max_query_length + 1):
+        print(f"  Searching {query_length}bp repeats with positions...")
+        for i in range(seq_len):
+            window = sequence[i : i + window_size]
+            for record in findRepeatsWithPositions(
+                window,
+                i,
+                query_length,
+                min_spacer=min_spacer,
+                imperfect_homology=imperfect_homology,
+                min_homology=min_homology,
+                fixed_errors=fixed_errors,
+                inverted=inverted,
+            ):
+                key = (
+                    record["query_start"],
+                    record["query_end"],
+                    record["match_start"],
+                    record["match_end"],
+                )
+                if key not in seen:
+                    seen.add(key)
+                    all_repeats.append(record)
+
+    print(f"Found {len(all_repeats)} unique repeat pairs.")
+    return all_repeats
+
+def filterRedundantRepeats(repeats: list[RepeatRecord]) -> list[RepeatRecord]:
+    """Remove repeats fully contained by longer already-kept repeats.
+
+    Args:
+        repeats: List of position-aware repeat records.
+
+    Returns:
+        Filtered repeats sorted by descending repeat length.
+    """
+    sorted_repeats = sorted(repeats, key=lambda record: record["length"], reverse=True)
+    non_redundant: list[RepeatRecord] = []
+
+    for record in sorted_repeats:
+        redundant = any(
+            kept["query_start"] <= record["query_start"]
+            and record["query_end"] <= kept["query_end"]
+            and kept["match_start"] <= record["match_start"]
+            and record["match_end"] <= kept["match_end"]
+            for kept in non_redundant
+        )
+        if not redundant:
+            non_redundant.append(record)
+
+    print(f"Reduced from {len(repeats)} to {len(non_redundant)} non-redundant repeats.")
+    return non_redundant
