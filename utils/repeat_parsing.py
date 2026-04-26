@@ -120,6 +120,51 @@ def normalizeRepeatType(repeat_type: RepeatType | bool) -> RepeatType:
         raise ValueError('repeat_type must be "direct", "inverted", or "both".')
     return normalized
 
+def findInteriorFuzzyMatch(
+    query: str,
+    candidate_region: str,
+    pattern: re.Pattern,
+    min_candidate_length: int,
+    max_candidate_length: int,
+) -> str | None:
+    """Find a fuzzy homology match while rejecting terminal-base errors.
+
+    Args:
+        query: Expected direct or reverse-complemented repeat sequence.
+        candidate_region: Candidate search region from the search window.
+        pattern: Compiled fuzzy regex pattern for the query.
+        min_candidate_length: Shortest candidate span to evaluate.
+        max_candidate_length: Longest candidate span to evaluate.
+
+    Returns:
+        Matched candidate sequence when it is within the configured error
+        tolerance and both terminal bases match exactly; otherwise None.
+    """
+    if not query or not candidate_region:
+        return None
+
+    best_match: tuple[int, int, str] | None = None
+    max_length = min(max_candidate_length, len(candidate_region))
+    for candidate_length in range(min_candidate_length, max_length + 1):
+        candidate = candidate_region[:candidate_length]
+        if query[0] != candidate[0] or query[-1] != candidate[-1]:
+            continue
+
+        match = pattern.fullmatch(candidate)
+        if match is None:
+            continue
+
+        fuzzy_counts = getattr(match, "fuzzy_counts", (0, 0, 0))
+        error_count = sum(fuzzy_counts)
+        length_delta = abs(len(query) - candidate_length)
+        match_score = (error_count, length_delta, candidate)
+        if best_match is None or match_score < best_match:
+            best_match = match_score
+
+    if best_match is None:
+        return None
+    return best_match[2]
+
 def searchSequenceForRepeats(
     sequence: str,
     min_query_length: int = 4,
@@ -235,6 +280,8 @@ def findRepeatsWithPositions(
             errors = int(fixed_errors)
     else:
         errors = 0
+    min_candidate_length = max(1, query_length - errors)
+    max_candidate_length = query_length + errors
 
     types_to_search = (
         ("direct", "inverted") if repeat_type == "both" else (repeat_type,)
@@ -253,28 +300,37 @@ def findRepeatsWithPositions(
         if imperfect_homology
     }
 
-    for i in range(len(search_seq) - query_length + 1):
-        candidate = search_seq[i : query_length + i]
+    candidate_starts = len(search_seq) - min_candidate_length + 1
+    for i in range(candidate_starts):
+        candidate_region = search_seq[i : i + max_candidate_length]
 
         for current_type in types_to_search:
             query = query_by_type[current_type]
             if imperfect_homology:
-                is_match = bool(patterns[current_type].search(candidate))
+                candidate = findInteriorFuzzyMatch(
+                    query,
+                    candidate_region,
+                    patterns[current_type],
+                    min_candidate_length,
+                    max_candidate_length,
+                )
+                is_match = candidate is not None
             else:
+                candidate = candidate_region[:query_length]
                 is_match = candidate == query
 
             if is_match:
                 is_inverted = current_type == "inverted"
+                match_start = window_start + query_length + min_spacer + i
+                match_end = match_start + len(candidate)
                 results.append(
                     {
                         "query_seq": query_string,
                         "match_seq": candidate,
                         "query_start": window_start,
                         "query_end": window_start + query_length,
-                        "match_start": window_start + query_length + min_spacer + i,
-                        "match_end": (
-                            window_start + query_length + min_spacer + i + query_length
-                        ),
+                        "match_start": match_start,
+                        "match_end": match_end,
                         "is_perfect": candidate == query,
                         "length": query_length,
                         "repeat_type": current_type,

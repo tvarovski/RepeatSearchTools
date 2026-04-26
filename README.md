@@ -39,6 +39,10 @@ pip install regex matplotlib numpy
 - `min_homology`: minimum fractional homology for approximate matching
 - `fixed_errors`: explicit edit-distance limit; set to `False` to use `min_homology`
 
+For imperfect matches, terminal bases must match exactly. Allowed errors are only accepted inside the repeat, which avoids greedy edge matches. Candidate match spans may be shorter or longer than the query when insertions or deletions are used, and `match_end` records the actual matched span.
+
+Search time is very sensitive to `window_size`. Smaller values run faster because distant repeat pairs are not evaluated.
+
 ## Visualization
 
 The notebook runs `searchSequenceForRepeats` once. It returns position-aware repeat records, and those same records are used for both JSON output and visualization.
@@ -54,6 +58,10 @@ Each JSON record contains:
 - `inverted`
 
 By default, the plot is saved as `repeat_visualization.png`.
+
+`visualizeRepeats` uses translucent solid arcs and distinct colors for perfect/imperfect direct/inverted repeats. You can tune the figure with optional arguments such as `arc_alpha=0.2` for lighter arcs, `density_cmap="viridis"` for a different density colormap, or `min_interval_length=18` to show baseline interval rectangles only for longer repeats.
+
+Arcs are anchored at each repeat segment midpoint. Heatmap density is center-weighted across each repeat span, so high-activity regions remain visible without treating start and end positions as separate signals.
 
 ## Method Overview
 
