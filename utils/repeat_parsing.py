@@ -1,6 +1,10 @@
 from __future__ import annotations
-from typing import TypedDict
+from functools import lru_cache
+from typing import Literal, TypedDict
 import regex as re
+
+RepeatType = Literal["direct", "inverted", "both"]
+_COMPLEMENT_TABLE = str.maketrans("ATGCatgc-", "TACGtacg-")
 
 class RepeatRecord(TypedDict):
     """Position-aware repeat metadata for a single repeat pair."""
@@ -13,6 +17,7 @@ class RepeatRecord(TypedDict):
     match_end: int
     is_perfect: bool
     length: int
+    repeat_type: Literal["direct", "inverted"]
     inverted: bool
 
 
@@ -81,6 +86,7 @@ def compl(base: str) -> str:
         raise ValueError(f"Unsupported base '{base}'.")
     return complements[base]
 
+@lru_cache(maxsize=100_000)
 def rev_compl(seq: str) -> str:
     """Return reverse complement of a DNA sequence.
 
@@ -90,7 +96,29 @@ def rev_compl(seq: str) -> str:
     Returns:
         Reverse-complemented sequence.
     """
-    return "".join(compl(base) for base in reversed(seq))
+    return seq.translate(_COMPLEMENT_TABLE)[::-1]
+
+def normalizeRepeatType(repeat_type: RepeatType | bool) -> RepeatType:
+    """Normalize repeat-type input while accepting the previous boolean form.
+
+    Args:
+        repeat_type: `"direct"`, `"inverted"`, `"both"`, or legacy boolean.
+
+    Returns:
+        Normalized repeat-type string.
+
+    Raises:
+        ValueError: If the repeat type is unsupported.
+    """
+    if repeat_type is True:
+        return "inverted"
+    if repeat_type is False:
+        return "direct"
+
+    normalized = repeat_type.lower()
+    if normalized not in {"direct", "inverted", "both"}:
+        raise ValueError('repeat_type must be "direct", "inverted", or "both".')
+    return normalized
 
 def searchSequenceForRepeats(
     sequence: str,
@@ -101,7 +129,7 @@ def searchSequenceForRepeats(
     imperfect_homology: bool = False,
     min_homology: float = 0.8,
     fixed_errors: int | bool = False,
-    inverted: bool = True,
+    repeat_type: RepeatType | bool = "inverted",
 ) -> list[RepeatRecord]:
     """Search a full DNA sequence and retain exact coordinate information.
 
@@ -114,7 +142,9 @@ def searchSequenceForRepeats(
         imperfect_homology: Whether to allow approximate matching.
         min_homology: Minimum homology for approximate matching.
         fixed_errors: Explicit max edit distance for approximate matching.
-        inverted: Whether to search for inverted (True) or direct (False) repeats.
+        repeat_type: Which repeat orientation to search: `"direct"`, `"inverted"`,
+            or `"both"`. Legacy booleans are accepted (`True` = inverted,
+            `False` = direct).
 
     Returns:
         Deduplicated list of position-aware repeat records.
@@ -122,6 +152,8 @@ def searchSequenceForRepeats(
     if not validateDNASquence(sequence):
         print("Sequence validation failed. Please check your input.")
         return []
+
+    repeat_type = normalizeRepeatType(repeat_type)
 
     if imperfect_homology:
         print("Search has been set to find imperfect repeats")
@@ -131,9 +163,10 @@ def searchSequenceForRepeats(
             print(f"    Searching with a minimum of {min_homology} homology")
     else:
         print("Search has been set to find perfect repeats")
+    print(f"Repeat type: {repeat_type}")
 
     all_repeats: list[RepeatRecord] = []
-    seen: set[tuple[int, int, int, int]] = set()
+    seen: set[tuple[int, int, int, int, str]] = set()
     seq_len = len(sequence)
 
     for query_length in range(min_query_length, max_query_length + 1):
@@ -148,13 +181,14 @@ def searchSequenceForRepeats(
                 imperfect_homology=imperfect_homology,
                 min_homology=min_homology,
                 fixed_errors=fixed_errors,
-                inverted=inverted,
+                repeat_type=repeat_type,
             ):
                 key = (
                     record["query_start"],
                     record["query_end"],
                     record["match_start"],
                     record["match_end"],
+                    record["repeat_type"],
                 )
                 if key not in seen:
                     seen.add(key)
@@ -171,7 +205,7 @@ def findRepeatsWithPositions(
     imperfect_homology: bool = False,
     min_homology: float = 0.8,
     fixed_errors: int | bool = False,
-    inverted: bool = True,
+    repeat_type: RepeatType | bool = "inverted",
 ) -> list[RepeatRecord]:
     """Find repeats in a local window and map coordinates to full sequence.
 
@@ -183,43 +217,70 @@ def findRepeatsWithPositions(
         imperfect_homology: Whether to allow approximate matching.
         min_homology: Minimum homology fraction for approximate matching.
         fixed_errors: Explicit max edit distance for approximate matching.
-        inverted: Whether to search for inverted or direct repeats.
+        repeat_type: Which repeat orientation to search: `"direct"`, `"inverted"`,
+            or `"both"`. Legacy booleans are accepted (`True` = inverted,
+            `False` = direct).
 
     Returns:
         List of position-aware repeat records.
     """
+    repeat_type = normalizeRepeatType(repeat_type)
     query_string = window[:query_length]
-    query = rev_compl(query_string) if inverted else query_string
     search_seq = window[query_length + min_spacer :]
     results: list[RepeatRecord] = []
 
     if imperfect_homology:
-        errors = round(len(query) * (1 - min_homology))
+        errors = round(query_length * (1 - min_homology))
         if fixed_errors is not False:
             errors = int(fixed_errors)
+    else:
+        errors = 0
+
+    types_to_search = (
+        ("direct", "inverted") if repeat_type == "both" else (repeat_type,)
+    )
+    query_by_type = {
+        current_type: (
+            rev_compl(query_string) if current_type == "inverted" else query_string
+        )
+        for current_type in types_to_search
+    }
+    patterns = {
+        current_type: re.compile(
+            f"({re.escape(query_by_type[current_type])}){{e<={errors}}}"
+        )
+        for current_type in types_to_search
+        if imperfect_homology
+    }
 
     for i in range(len(search_seq) - query_length + 1):
         candidate = search_seq[i : query_length + i]
 
-        if imperfect_homology:
-            is_match = bool(re.findall(f"({query}){{e<={errors}}}", candidate))
-        else:
-            is_match = candidate == query
+        for current_type in types_to_search:
+            query = query_by_type[current_type]
+            if imperfect_homology:
+                is_match = bool(patterns[current_type].search(candidate))
+            else:
+                is_match = candidate == query
 
-        if is_match:
-            results.append(
-                {
-                    "query_seq": query_string,
-                    "match_seq": candidate,
-                    "query_start": window_start,
-                    "query_end": window_start + query_length,
-                    "match_start": window_start + query_length + min_spacer + i,
-                    "match_end": window_start + query_length + min_spacer + i + query_length,
-                    "is_perfect": candidate == query,
-                    "length": query_length,
-                    "inverted": inverted,
-                }
-            )
+            if is_match:
+                is_inverted = current_type == "inverted"
+                results.append(
+                    {
+                        "query_seq": query_string,
+                        "match_seq": candidate,
+                        "query_start": window_start,
+                        "query_end": window_start + query_length,
+                        "match_start": window_start + query_length + min_spacer + i,
+                        "match_end": (
+                            window_start + query_length + min_spacer + i + query_length
+                        ),
+                        "is_perfect": candidate == query,
+                        "length": query_length,
+                        "repeat_type": current_type,
+                        "inverted": is_inverted,
+                    }
+                )
 
     return results
 

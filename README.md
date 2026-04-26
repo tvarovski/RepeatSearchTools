@@ -30,7 +30,7 @@ pip install regex matplotlib numpy
 
 ## Search Parameters
 
-- `inverted`: search inverted repeats when `True`, direct repeats when `False`
+- `repeat_type`: `"direct"`, `"inverted"`, or `"both"`
 - `min_query_length`: shortest repeat length to test
 - `max_query_length`: longest repeat length to test
 - `min_spacer`: minimum distance between the query and matched repeat
@@ -50,6 +50,7 @@ Each JSON record contains:
 - `match_start` and `match_end`
 - `is_perfect`
 - `length`
+- `repeat_type`
 - `inverted`
 
 By default, the plot is saved as `repeat_visualization.png`.
