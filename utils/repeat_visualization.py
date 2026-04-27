@@ -207,7 +207,7 @@ def visualizeRepeats(
         ax_heat.spines[spine].set_visible(False)
 
     color_bar = plt.colorbar(heatmap, ax=ax_heat, orientation="horizontal", pad=0.35)
-    color_bar.set_label("Centered Density", fontsize=8)
+    color_bar.set_label("Repeat Density", fontsize=8)
     color_bar.outline.set_visible(False)
     color_bar.ax.tick_params(axis="x", labelsize=8, length=0)
     heat_pos = ax_heat.get_position()
