@@ -63,6 +63,9 @@ By default, the plot is saved as `repeat_visualization.png`.
 
 Arcs are anchored at each repeat segment midpoint. Heatmap density is center-weighted across each repeat span, so high-activity regions remain visible without treating start and end positions as separate signals.
 
+Example visualization:
+![](https://github.com/tvarovski/RepeatSearchTools/blob/main/repeat_visualization.png)
+
 ## Method Overview
 
 ![](https://github.com/tvarovski/RepeatSearchTools/blob/main/method_overview.png)
